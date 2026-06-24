@@ -125,23 +125,28 @@ func (u *UI) stepHeader(step, max int) {
 	fmt.Fprintf(u.out, "\n%s %s\n", u.colorize(cGray, "▸"), u.colorize(cBold, fmt.Sprintf("Étape %d/%d", step, max)))
 }
 
-func (u *UI) agentLine(content string) {
-	fmt.Fprintf(u.out, "%s %s\n", u.colorize(cCyan, iAgent), content)
+// agentMarkdown affiche une réponse complète (chemin non-streamé), formatée en
+// Markdown sous l'en-tête 🤖.
+func (u *UI) agentMarkdown(content string) {
+	u.streamPrefix()
+	md := u.newMarkdownStream()
+	md.write(content)
+	md.flush()
 }
 
-// Streaming : en-tête imprimé une fois, puis les tokens à la volée.
+// Streaming : en-tête imprimé une fois, puis les tokens à la volée. Le contenu
+// "réponse" passe par mdStream (Markdown) ; streamToken sert au raisonnement brut.
 func (u *UI) streamPrefix()        { fmt.Fprintf(u.out, "%s ", u.colorize(cCyan, iAgent)) }
 func (u *UI) streamToken(s string) { fmt.Fprint(u.out, s) }
-func (u *UI) streamEnd()           { fmt.Fprintln(u.out) }
 
 // Bloc de raisonnement streamé (modèles "thinking"). On ouvre la couleur grisée
 // au début et on la referme à la fin, pour teinter tout le bloc sans ré-émettre
 // de code couleur à chaque token.
 func (u *UI) reasoningStart() {
 	if u.color {
-		fmt.Fprintf(u.out, "%s %s", u.colorize(cGray, "💭"), cDim)
+		fmt.Fprintf(u.out, "%s %s", u.colorize(cGray, iThink), cDim)
 	} else {
-		fmt.Fprint(u.out, "💭 ")
+		fmt.Fprint(u.out, iThink+" ")
 	}
 }
 
@@ -154,15 +159,102 @@ func (u *UI) reasoningEnd() {
 
 // reasoningBlock affiche un raisonnement déjà complet (chemin non-streamé).
 func (u *UI) reasoningBlock(s string) {
-	fmt.Fprintf(u.out, "%s %s\n", u.colorize(cGray, "💭"), u.colorize(cDim, formatLogMessage(s)))
+	fmt.Fprintf(u.out, "%s %s\n", u.colorize(cGray, iThink), u.colorize(cDim, formatLogMessage(s)))
 }
 
 // tokenUsage affiche le décompte réel de tokens renvoyé par le serveur, plus le
 // cumul de la session (utile pour comprendre/maîtriser le coût d'un agent).
 func (u *UI) tokenUsage(t *Usage, cumTotal int) {
-	line := fmt.Sprintf("🧮 tokens : %d contexte · %d réponse · %d total  ·  cumul session %d",
-		t.PromptTokens, t.CompletionTokens, t.TotalTokens, cumTotal)
+	line := fmt.Sprintf("%s tokens : %d contexte · %d réponse · %d total  ·  cumul session %d",
+		iTokens, t.PromptTokens, t.CompletionTokens, t.TotalTokens, cumTotal)
 	fmt.Fprintf(u.out, "%s\n", u.colorize(cGray, line))
+}
+
+// --- Rendu Markdown léger (pour le terminal, sans dépendance) ---
+// Le contenu est rendu ligne par ligne : on bufferise jusqu'au '\n' (compatible
+// avec le streaming token-par-token), puis on formate la ligne complète.
+
+var (
+	mdHeader = regexp.MustCompile(`^\s*(#{1,6})\s+(.*)$`)    // # Titre
+	mdBullet = regexp.MustCompile(`^(\s*)([-*])(\s+)(.*)$`)  // - item
+	mdNumber = regexp.MustCompile(`^(\s*)(\d+\.)(\s+)(.*)$`) // 1. item
+	mdBold   = regexp.MustCompile(`\*\*([^*]+)\*\*`)         // **gras**
+	mdCode   = regexp.MustCompile("`([^`]+)`")               // `code`
+)
+
+// mdStream rend du Markdown au fil de l'eau. inFence suit l'état "dans un bloc
+// de code ```", où l'on n'applique pas le formatage inline.
+type mdStream struct {
+	ui      *UI
+	buf     strings.Builder
+	inFence bool
+}
+
+func (u *UI) newMarkdownStream() *mdStream { return &mdStream{ui: u} }
+
+// write absorbe un fragment (qui peut contenir 0..N sauts de ligne) et émet
+// chaque ligne complète rencontrée.
+func (m *mdStream) write(s string) {
+	m.buf.WriteString(s)
+	for {
+		full := m.buf.String()
+		i := strings.IndexByte(full, '\n')
+		if i < 0 {
+			break
+		}
+		line := full[:i]
+		m.buf.Reset()
+		m.buf.WriteString(full[i+1:])
+		m.emit(line)
+	}
+}
+
+// flush émet la dernière ligne partielle (sans '\n' final dans le flux).
+func (m *mdStream) flush() {
+	if rest := m.buf.String(); rest != "" {
+		m.buf.Reset()
+		m.emit(rest)
+	}
+}
+
+func (m *mdStream) emit(line string) {
+	fmt.Fprintln(m.ui.out, m.ui.renderMarkdownLine(line, &m.inFence))
+}
+
+// renderMarkdownLine formate une ligne complète. Sans couleur (pipe/fichier),
+// on renvoie le texte brut inchangé.
+func (u *UI) renderMarkdownLine(line string, inFence *bool) string {
+	if !u.color {
+		return line
+	}
+	if strings.HasPrefix(strings.TrimSpace(line), "```") {
+		*inFence = !*inFence
+		return u.colorize(cGray, line) // la barrière ``` elle-même
+	}
+	if *inFence {
+		return u.colorize(cGreen, line) // contenu de code : vert, non interprété
+	}
+	if m := mdHeader.FindStringSubmatch(line); m != nil {
+		return u.colorize(cCyan+cBold, strings.TrimSpace(m[2]))
+	}
+	if m := mdBullet.FindStringSubmatch(line); m != nil {
+		return m[1] + u.colorize(cYellow, "•") + m[3] + u.renderInline(m[4])
+	}
+	if m := mdNumber.FindStringSubmatch(line); m != nil {
+		return m[1] + u.colorize(cYellow, m[2]) + m[3] + u.renderInline(m[4])
+	}
+	return u.renderInline(line)
+}
+
+// renderInline applique le formatage en ligne : `code` puis **gras**.
+func (u *UI) renderInline(s string) string {
+	s = mdCode.ReplaceAllStringFunc(s, func(tok string) string {
+		return u.colorize(cCyan, mdCode.FindStringSubmatch(tok)[1])
+	})
+	s = mdBold.ReplaceAllStringFunc(s, func(tok string) string {
+		return u.colorize(cBold, mdBold.FindStringSubmatch(tok)[1])
+	})
+	return s
 }
 
 // toolCallView affiche l'action décidée par le modèle, avant exécution.
@@ -187,14 +279,24 @@ func (u *UI) agentDone(steps int) {
 	fmt.Fprintf(u.out, "%s %s\n", u.colorize(cGreen, iDone), u.colorize(cDim, fmt.Sprintf("terminé en %d étape(s)", steps)))
 }
 
-// welcome affiche l'en-tête de démarrage + une légende des symboles.
-func (u *UI) welcome(c *LLMClient, cfg *Config) {
+// welcome affiche l'en-tête de démarrage : config effective, outils chargés,
+// légende des symboles et rappel des flags utiles.
+func (u *UI) welcome(c *LLMClient, cfg *Config, tools []string) {
+	rule := u.colorize(cCyan, "  "+strings.Repeat("─", 56))
 	u.println("")
-	u.println(u.colorize(cCyan+cBold, "  ⚙  Agent de codage"))
-	u.printf("  %s\n", u.colorize(cDim, fmt.Sprintf("modèle %s · streaming %s · %d étapes max · contexte ~%d tokens",
-		c.Model, onOff(c.Stream), cfg.MaxSteps, cfg.MaxContext)))
-	u.printf("  %s\n", u.colorize(cGray, fmt.Sprintf("légende : %s vous   %s agent   %s outil   %s résultat", iUser, iAgent, iTool, iResult)))
-	u.printf("  %s\n", u.colorize(cGray, "tape une mission · 'exit'/'quit' pour quitter · Ctrl-C interrompt un tour"))
+	u.println(rule)
+	u.printf("  %s%s\n", u.colorize(cCyan+cBold, "⚙  Agent de codage"), u.colorize(cDim, "  — boucle LLM + outils, en direct"))
+	u.println(rule)
+	u.printf("  %s %s\n", u.colorize(cBold, "Modèle  :"), c.Model)
+	u.printf("  %s %s\n", u.colorize(cBold, "Serveur :"), c.BaseURL)
+	u.printf("  %s streaming %s · %d étapes max · contexte ~%d tokens · temp %.2f\n",
+		u.colorize(cBold, "Réglages:"), onOff(c.Stream), cfg.MaxSteps, cfg.MaxContext, c.Temperature)
+	u.printf("  %s %s\n", u.colorize(cBold, "Outils  :"), strings.Join(tools, ", "))
+	u.println("")
+	u.printf("  %s\n", u.colorize(cGray, fmt.Sprintf("légende : %s vous · %s agent · %s raisonnement · %s outil · %s résultat · %s tokens",
+		iUser, iAgent, iThink, iTool, iResult, iTokens)))
+	u.printf("  %s\n", u.colorize(cGray, "flags   : -quiet (sans logs) · -verbose (détaillé) · -max-steps N · --help"))
+	u.printf("  %s\n", u.colorize(cGray, "clavier : 'exit'/'quit' pour quitter · Ctrl-C interrompt un tour"))
 }
 
 // --- Helpers de formatage (purs, sans couleur : testables isolément) ---

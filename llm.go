@@ -351,6 +351,7 @@ func (c *LLMClient) chatStream(ctx context.Context, req ChatRequest) (Message, e
 	toolCalls := make(map[int]*ToolCall)
 	var indices []int
 	var usage *Usage
+	var md *mdStream        // rendu Markdown du contenu, créé au 1er token réel
 	contentStarted := false // l'en-tête 🤖 a-t-il été imprimé ?
 	reasoningOpen := false  // un bloc 💭 est-il en cours ?
 
@@ -394,10 +395,11 @@ func (c *LLMClient) chatStream(ctx context.Context, req ChatRequest) (Message, e
 							if strings.TrimSpace(content.String()) != "" {
 								contentStarted = true
 								c.ui.streamPrefix()
-								c.ui.streamToken(strings.TrimLeft(content.String(), " \t\r\n"))
+								md = c.ui.newMarkdownStream()
+								md.write(strings.TrimLeft(content.String(), " \t\r\n"))
 							}
 						} else {
-							c.ui.streamToken(delta.Content)
+							md.write(delta.Content)
 						}
 					}
 
@@ -434,7 +436,7 @@ func (c *LLMClient) chatStream(ctx context.Context, req ChatRequest) (Message, e
 		c.ui.reasoningEnd()
 	}
 	if contentStarted {
-		c.ui.streamEnd()
+		md.flush() // rend la dernière ligne partielle + saut de ligne final
 	}
 
 	msg.Content = content.String()

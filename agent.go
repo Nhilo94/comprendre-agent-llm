@@ -18,12 +18,15 @@ type Agent struct {
 	history  []Message
 	maxSteps int
 	maxCtx   int
+
+	lastStepSig string // signature des actions de l'étape précédente (anti-boucle)
 }
 
 // handleTurn fait tourner la boucle agent jusqu'à ce qu'il n'y ait plus
 // d'action à exécuter (ou que la limite d'étapes soit atteinte). Le context
 // permet d'interrompre proprement un tour (Ctrl-C, timeout).
 func (a *Agent) handleTurn(ctx context.Context) {
+	a.lastStepSig = "" // nouveau tour : on réinitialise la détection de boucle
 	for step := 0; step < a.maxSteps; step++ {
 		a.ui.stepHeader(step+1, a.maxSteps)
 
@@ -46,7 +49,7 @@ func (a *Agent) handleTurn(ctx context.Context) {
 				a.ui.reasoningBlock(msg.ReasoningContent)
 			}
 			if strings.TrimSpace(msg.Content) != "" {
-				a.ui.agentLine(msg.Content)
+				a.ui.agentMarkdown(msg.Content)
 			}
 		}
 
@@ -57,6 +60,9 @@ func (a *Agent) handleTurn(ctx context.Context) {
 
 		// Chemin natif : appels d'outils structurés (function calling).
 		if len(msg.ToolCalls) > 0 {
+			if a.isLoop(toolCallsSig(msg.ToolCalls), step) {
+				return
+			}
 			for _, call := range msg.ToolCalls {
 				result := a.runTool(ctx, call.Function.Name, parseJSONArgs(call.Function.Arguments))
 				a.history = append(a.history, Message{
@@ -76,12 +82,41 @@ func (a *Agent) handleTurn(ctx context.Context) {
 			a.ui.agentDone(step + 1)
 			return
 		}
+		if a.isLoop(actionSig(name, args), step) {
+			return
+		}
 		a.ui.logStep("PARSER", "action texte détectée: %s args=%v", name, args)
 		result := a.runTool(ctx, name, args)
 		a.history = append(a.history, Message{Role: "user", Content: fmt.Sprintf("Résultat outil %s:\n%s", name, result)})
 	}
 
 	a.ui.banner(cYellow, "LIMITE", "Limite de %d étapes atteinte — la mission n'est peut-être pas terminée.", a.maxSteps)
+}
+
+// isLoop arrête le tour si l'agent redemande exactement la/les même(s)
+// action(s) qu'à l'étape précédente : aucun progrès, on évite la boucle (vaut
+// pour le function calling natif comme pour le parsing texte).
+func (a *Agent) isLoop(sig string, step int) bool {
+	if step > 0 && sig == a.lastStepSig {
+		a.ui.banner(cYellow, "BOUCLE", "Action identique répétée — arrêt pour éviter une boucle (l'agent ne progresse plus).")
+		return true
+	}
+	a.lastStepSig = sig
+	return false
+}
+
+// actionSig / toolCallsSig produisent une signature stable d'une action, pour
+// comparer deux étapes successives.
+func actionSig(name string, args map[string]string) string {
+	return name + "(" + formatArgs(args) + ")"
+}
+
+func toolCallsSig(calls []ToolCall) string {
+	parts := make([]string, 0, len(calls))
+	for _, c := range calls {
+		parts = append(parts, c.Function.Name+"("+c.Function.Arguments+")")
+	}
+	return strings.Join(parts, ";")
 }
 
 // runTool affiche l'action, applique le garde-fou, exécute l'outil, gère les

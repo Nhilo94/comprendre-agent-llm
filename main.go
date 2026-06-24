@@ -36,7 +36,7 @@ func main() {
 		maxCtx:   cfg.MaxContext,
 	}
 
-	ui.welcome(client, cfg)
+	ui.welcome(client, cfg, registry.Names())
 	ui.logStep("INIT", "modèle: %s | streaming: %t | outils: %s", client.Model, client.Stream, strings.Join(registry.Names(), ", "))
 
 	for {

@@ -226,15 +226,22 @@ func truncateOutput(s string, maxBytes int) string {
 // échappés (\").
 var argRe = regexp.MustCompile(`([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*"((?:[^"\\]|\\.)*)"`)
 
-// parseAction détecte un appel d'outil écrit en texte par le modèle. Le motif
-// est construit à partir des noms réellement enregistrés.
+// parseAction détecte un appel d'outil écrit en texte par le modèle (pour les
+// modèles sans function calling natif). On exige le préfixe "Action:" EN DÉBUT
+// DE LIGNE — c'est la convention donnée dans le prompt système. Cette ancre
+// évite un piège classique : quand le modèle RÉCAPITULE ("1. Action: write_file
+// (...)"), il cite l'action sans la redemander ; sans l'ancre, on la
+// ré-exécuterait en boucle.
 func parseAction(reply string, registry *ToolRegistry) (name string, args map[string]string, found bool) {
 	names := registry.Names()
 	if len(names) == 0 {
 		return "", nil, false
 	}
 
-	pattern := `(?s)\b(` + strings.Join(names, "|") + `)\s*\(\s*(.*)\)`
+	// (?m) : ^ s'ancre en début de ligne ; (?s) : . traverse les sauts de ligne
+	// (arguments multi-lignes). \s* ne mange que de l'espace, donc "1. Action:"
+	// (précédé de "1. ") ne matche pas.
+	pattern := `(?sm)^[ \t]*Action\s*:\s*(` + strings.Join(names, "|") + `)\s*\(\s*(.*)\)`
 	re := regexp.MustCompile(pattern)
 
 	m := re.FindStringSubmatch(reply)
