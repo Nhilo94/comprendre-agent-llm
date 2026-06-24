@@ -1,0 +1,12 @@
+# Binaire compilé
+/agentic
+agentic
+*.exe
+
+# macOS
+.DS_Store
+
+# Éditeurs
+.idea/
+.vscode/
+*.swp
